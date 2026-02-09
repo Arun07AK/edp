@@ -1,0 +1,139 @@
+/*
+ * EXPERIMENT 14: BRONZE CHALLENGE (STANDARD LOGIC)
+ * ------------------------------------------------
+ * Logic:
+ * - Motors: HIGH = Forward (Standard L298N)
+ * - Start: Wait for 'x' from XBee
+ * - Stop: Wait for 's' or Obstacle < 15cm
+ * - Parking: Counts 5 Black Lines to park
+ */
+
+// --- PIN DEFINITIONS ---
+// Right Motor
+const int rightPos = 5;  // IN1
+const int rightNeg = 6;  // IN2
+// Left Motor
+const int leftPos = 7;   // IN3
+const int leftNeg = 8;   // IN4
+
+// Sensors
+const int irLeft = A0;   // Left Eye
+const int irRight = A1;  // Right Eye
+const int gantryPin = A2;// Gantry Receiver
+
+// Ultrasonic
+const int trigPin = 13;
+const int echoPin = 12;
+
+// --- VARIABLES ---
+bool start = false;
+int prevGantry = 0;
+int counter = 0;         // Parking Line Counter
+unsigned long prevTime = 0;
+unsigned long currentTime;
+
+void setup() {
+  // 1. Output Pins (Motors + Trig)
+  pinMode(rightPos, OUTPUT); pinMode(rightNeg, OUTPUT);
+  pinMode(leftPos, OUTPUT);  pinMode(leftNeg, OUTPUT);
+  pinMode(trigPin, OUTPUT);
+
+  // 2. Input Pins (Sensors + Echo)
+  pinMode(irLeft, INPUT); 
+  pinMode(irRight, INPUT);
+  pinMode(gantryPin, INPUT);
+  pinMode(echoPin, INPUT);
+
+  // 3. Communication
+  Serial.begin(9600);   // USB (Debug)
+  Serial1.begin(9600);  // XBee (Remote Control)
+}
+
+// --- STANDARD MOTION FUNCTIONS ---
+// Forward: Pos=HIGH, Neg=LOW
+void Forward() {
+  digitalWrite(rightPos, HIGH); digitalWrite(rightNeg, LOW);
+  digitalWrite(leftPos, HIGH);  digitalWrite(leftNeg, LOW);
+}
+
+// Left Turn: Right FWD, Left BACK
+void Left() {
+  digitalWrite(rightPos, HIGH); digitalWrite(rightNeg, LOW);
+  digitalWrite(leftPos, LOW);   digitalWrite(leftNeg, HIGH);
+}
+
+// Right Turn: Right BACK, Left FWD
+void Right() {
+  digitalWrite(rightPos, LOW);  digitalWrite(rightNeg, HIGH);
+  digitalWrite(leftPos, HIGH);  digitalWrite(leftNeg, LOW);
+}
+
+void Stop() {
+  digitalWrite(rightPos, LOW); digitalWrite(rightNeg, LOW);
+  digitalWrite(leftPos, LOW);  digitalWrite(leftNeg, LOW);
+}
+
+void loop() {
+  // 1. LISTEN FOR START
+  if (Serial1.available()) {
+    char cmd = Serial1.read();
+    if (cmd == 'x') start = true;        // GO
+    if (cmd == 's') { start = false; Stop(); } // STOP
+  }
+
+  if (start) {
+    // Read IR Sensors (0 = Black, 1 = White)
+    int d0 = digitalRead(irLeft);
+    int d1 = digitalRead(irRight);
+
+    // 2. OBSTACLE CHECK (Ultrasonic)
+    long duration, dist;
+    digitalWrite(trigPin, LOW); delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    duration = pulseIn(echoPin, HIGH, 5000); // 5ms timeout
+    dist = (duration == 0) ? 999 : (duration * 0.034 / 2);
+
+    if (dist > 0 && dist < 15) {
+      Stop(); delay(500); return; // Safety Stop
+    }
+
+    // 3. GANTRY CHECK (Pulse Decoder)
+    unsigned long g = pulseIn(gantryPin, HIGH, 5000);
+    
+    if (g >= 500 && g < 1500 && prevGantry != 1) {
+      Stop(); delay(1000); prevGantry = 1; Serial1.println("Gantry 1");
+    }
+    else if (g >= 1500 && g < 2500 && prevGantry != 2) {
+      Stop(); delay(1000); prevGantry = 2; Serial1.println("Gantry 2");
+    }
+    else if (g >= 2500 && g < 3500 && prevGantry != 3) {
+      Stop(); delay(1000); prevGantry = 3; Serial1.println("Gantry 3");
+    }
+
+    // 4. PARKING LOGIC (Count Black Lines)
+    // Condition: BOTH sensors on Black (d0=0, d1=0)
+    if (d0 == 0 && d1 == 0) {
+      currentTime = millis();
+      if (currentTime - prevTime > 500) { // Debounce
+        counter++;
+        prevTime = currentTime;
+        Serial1.print("Count: "); Serial1.println(counter);
+
+        // Parking Sequence
+        if (counter == 1) { Forward(); delay(25); }         // Start
+        else if (counter == 2) { Left(); delay(20); }       // Turn 1
+        else if (counter == 3) { Forward(); delay(13); }    // Drive
+        else if (counter == 4) { Left(); delay(150); }      // Turn 2
+        else if (counter == 5) { Stop(); start = false; Serial1.println("Parked"); }
+      }
+      else {
+        Forward(); // Ignore line if we just counted it
+      }
+    }
+    // 5. LINE FOLLOWING
+    else if (d0 == 0) { Left(); }   // Left sensor on line -> Turn Left
+    else if (d1 == 0) { Right(); }  // Right sensor on line -> Turn Right
+    else { Forward(); }             // On White -> Go Straight
+  }
+}
